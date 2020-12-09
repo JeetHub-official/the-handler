@@ -347,3 +347,217 @@ def pre_process_train(list_of_frames):
 
     return clip
 
+
+def addGuassNoise(img):
+    row,col,ch= img.shape
+    mean = 0.2
+    var = 0.3
+    sigma = var**0.5
+    gauss = np.random.normal(mean,sigma,(row,col,ch))
+    gauss = gauss.reshape(row,col,ch)
+    noisy = img + gauss
+    return noisy.astype(uint8)
+  
+def transform_data_aug(img, transform):
+    
+    if transform=='':
+        return img
+    elif transform=='Blur':
+        return cv2.blur(img,(10,10))
+    elif transform=='Brightness':
+        return (img + (150/255)).astype(uint8)
+    elif transform=='Contrast':
+        return (img * 0.5).astype(uint8)
+    elif transform=='AddNoise':
+        return addGuassNoise(img)
+    elif transform=='CentreCrop':
+        h, w, _ = img.shape
+        margin = 5
+        x1, y1, x2, y2 = h*margin/100, w*margin/100, h-h*margin/100, w-w*margin/100 
+        x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+        return img[x1:x2,y1:y2]
+    elif transform=='RightUPCrop':
+        h, w, _ = img.shape
+        margin = 10
+        x1, y1, x2, y2 = 0, w*margin/100, h-h*margin/100, w 
+        x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+        return img[x1:x2,y1:y2]
+    elif transform=='RightDOWNCrop':
+        h, w, _ = img.shape
+        margin = 10
+        x1, y1, x2, y2 = h*margin/100, w*margin/100, h, w
+        x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+        return img[x1:x2,y1:y2]
+    elif transform=='LeftUPCrop':
+        h, w, _ = img.shape
+        margin = 10
+        x1, y1, x2, y2 = 0, 0, h-h*margin/100, w-w*margin/100
+        x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+        return img[x1:x2,y1:y2]
+    elif transform=='LeftDOWNCrop':
+        h, w, _ = img.shape
+        margin = 10
+        x1, y1, x2, y2 = h*margin/100, 0, h, w-w*margin/100 
+        x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+        return img[x1:x2,y1:y2]
+    else:
+        return img
+
+def getData(id, directory):
+    global opt
+    
+    print('Extracting data')
+    os.mkdir(directory)
+    with zipfile.ZipFile(f'data{id}.zip',"r") as zip_ref:
+        zip_ref.extractall(directory)
+    
+    os.remove(f'data{id}.zip')
+    df=pd.read_csv(f'{directory}/class_labels.csv', sep=',',header=None)
+    labels = df.values
+    print('Labels Detected:',labels)
+
+    transforms_for_data_aug = ['','Blur','Brightness','Contrast', 'AddNoise', 'CentreCrop', 'RightUPCrop', 'RightDOWNCrop', 'LeftUPCrop', 'LeftDOWNCrop']
+ 
+    train_dataset = [] 
+    val_dataset = []
+    files = {}  
+    print('Starting Data Augmentation with modes:',transforms_for_data_aug)
+    #for filename in tqdm(os.listdir(directory),desc='Augumented Data Prepared'):
+    for filename in os.listdir(directory):
+        if filename.endswith(".jpg"):
+            class_name, sample_no, frame_no = filename.split('-')
+            frame_no, _ = frame_no.split('.')
+            #print(int(frame_no[5:]))
+            if class_name+sample_no not in files.keys():
+                for t in transforms_for_data_aug:
+                    files[class_name+sample_no+t] = {'label': class_name, 'frames':[0]*16}
+            
+            img = cv2.imread(f'{directory}/{filename}')
+            img = cv2.resize(img,(112,112),interpolation = cv2.INTER_AREA)
+            for t in transforms_for_data_aug:
+                tempImg = transform_data_aug(img=img,transform=t)
+                #cv2.imwrite(f'./AugData/{class_name}-{sample_no}-{t}-{frame_no}.jpg',tempImg)
+                files[class_name+sample_no+t]['frames'][int(frame_no[5:])] = tempImg
+                
+    print('Data Augmentation Finished')        
+            
+    print(f'No_of_samples after data augmentation:{len(files)}')
+
+    split_dict={}
+    print('Starting Preprocessing for model')
+
+    #for key in tqdm(files.keys(),desc='Preprocessed Samples'):
+    for key in files.keys():
+            class_name = files[key]['label']
+            list_of_frames = files[key]['frames']
+
+            #print(f'{len(list_of_frames)} for {key}')
+            #print(np.where(labels==class_name)[0])
+            if class_name not in split_dict:
+                split_dict[class_name] = 0
+            if split_dict[class_name] < 1000: #to turn val off
+                train_dataset.append((pre_process_train(list_of_frames), torch.from_numpy(np.where(labels==class_name)[0])))
+                split_dict[class_name] += 1    
+            else:
+                val_dataset.append((pre_process_train(list_of_frames), torch.from_numpy(np.where(labels==class_name)[0])))
+            
+    print('Preprocessing finished')
+    shutil.rmtree(opt.train_directory+str(id))
+
+    return (train_dataset,val_dataset, len(labels))
+
+# MAIN FUNCTION
+def get_fine_tuned(id):
+
+    global opt 
+    opt = parse_opts()
+    
+    # Opt parameters
+    opt.confidence_threshold = 0.1
+    opt.frame_to_send = 60
+    opt.downsample = 2
+    opt.width_mult = 1.0
+    opt.pretrain_path = f'./PreTrained/jester_mobilenetv2_{opt.width_mult}x_RGB_16_best.pth'
+    opt.n_classes = 27
+    opt.sample_size = 112
+    opt.scale_in_test = 1.0
+    opt.no_cuda = False
+    opt.model = "mobilenetv2"
+    opt.arch = "mobilenetv2"
+    #opt.batch_size = 8
+    opt.no_train = False
+    opt.n_threads = 0
+    opt.ft_portion = 'last_layer'
+    #opt.n_epochs = 10
+    #opt.learning_rate = 0.01
+    opt.use_amp = True
+    
+    opt.scales = [opt.initial_scale]
+    for i in range(1, opt.n_scales):
+        opt.scales.append(opt.scales[-1] * opt.scale_step)
+    
+    opt.train_directory = './TrainData' 
+    training_data, validation_data, opt.n_finetune_classes = getData(id, opt.train_directory+str(id))
+    #training_data, validation_data = data[:int(len(data)*0.8)], data[int(len(data)*0.8)+1:]
+    print(f'Received Data for {opt.n_finetune_classes} classes')
+    print(f'Train Size: {len(training_data)}, Validation Size: {len(validation_data)}')
+    
+    # Model
+    model = mobilenetv2.get_model(
+                num_classes=opt.n_classes,
+                sample_size=opt.sample_size,
+                width_mult=opt.width_mult)
+    
+    # Model
+    print('Initializing model')  
+    model, parameters = intialize(model)
+    print('Model Intialized')
+    
+    #hyperparams
+    opt.n_epochs = 5
+    opt.batch_size = 8
+    opt.learning_rate = 0.01
+    
+    #report = []
+
+    opt.top1_values = []
+    opt.top3_values = []
+    opt.train_loss_values = []
+    opt.top1_values_val = []
+    opt.top3_values_val = []
+    opt.val_loss_values = []
+    
+    begin_time = time.time()
+    print("starting training")
+    model = train(model, parameters, training_data, validation_data)
+    del training_data
+    del validation_data
+    torch.cuda.empty_cache()
+    total_time = time.time() - begin_time
+    print(f"Training finished in {total_time}")
+    """
+    df_top1 = pd.DataFrame(opt.top1_values)
+    df_top1.to_csv(f'./Graph_data/top1_{lr}_{bsize}.csv',header=False,index=False)
+    df_top3 = pd.DataFrame(opt.top3_values)
+    df_top3.to_csv(f'./Graph_data/top3_{lr}_{bsize}.csv',header=False,index=False)
+    df_train_loss = pd.DataFrame(opt.train_loss_values)
+    df_train_loss.to_csv(f'./Graph_data/train_loss_{lr}_{bsize}.csv',header=False,index=False)
+    
+    df_top1_val = pd.DataFrame(opt.top1_values_val)
+    df_top1_val.to_csv(f'./Graph_data/top1_val_{lr}_{bsize}.csv',header=False,index=False)
+    df_top3_val = pd.DataFrame(opt.top3_values_val)
+    df_top3_val.to_csv(f'./Graph_data/top3_val_{lr}_{bsize}.csv',header=False,index=False)
+    df_val_loss = pd.DataFrame(opt.val_loss_values)
+    df_val_loss.to_csv(f'./Graph_data/val_loss_{lr}_{bsize}.csv',header=False,index=False)
+    
+    print('lr:',lr,'batch_size:',bsize,'train_acc:',opt.top1_values[-1],'val_acc:',opt.top1_values_val[-1],'time:',total_time)
+
+    report.append({'lr':lr,'batch_size':bsize,'train_acc':opt.top1_values,'val_acc':opt.top1_values_val,'time':total_time})
+    
+    print('Report:')
+    print(report)
+    """
+    return model
+    
+
+
