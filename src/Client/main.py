@@ -100,3 +100,101 @@ def pre_process(list_of_frames):
 		clip = clip.cuda()
 	
 	return clip
+	
+if __name__ == '__main__':
+
+	# Loading class labels (gestures)
+	df=pd.read_csv('./recorded_gestures/class_labels.csv', sep=',',header=None)
+	labels = df.values
+	print(labels)
+
+	# Initializing Opts
+	opt = parse_opts()
+	opt.confidence_threshold = 0.4
+	opt.frame_to_send = 60
+	opt.downsample = 2
+	opt.width_mult = 1.0
+	opt.n_classes = len(labels)
+	opt.sample_size = 112
+	opt.scale_in_test = 1.0
+	opt.no_cuda = True
+	opt.model = "mobilenetv2"
+	opt.arch = "mobilenetv2"
+	opt.pretrain_path = f"./FineTuned/output.pth"
+
+	opt.scales = [opt.initial_scale]
+	for i in range(1, opt.n_scales):
+		opt.scales.append(opt.scales[-1] * opt.scale_step)
+
+	opt.mean = get_mean(opt.norm_value, dataset=opt.mean_dataset)
+	opt.std = get_std(opt.norm_value)
+
+	# Normalization (NOT USED)
+	if opt.no_mean_norm and not opt.std_norm:
+	    norm_method = Normalize([0, 0, 0], [1, 1, 1])
+	elif not opt.std_norm:
+	    norm_method = Normalize(opt.mean, [1, 1, 1])
+	else:
+	    norm_method = Normalize(opt.mean, opt.std)
+	
+
+	# Model definition
+	model = mobilenetv2.get_model(
+		    num_classes=opt.n_classes,
+		    sample_size=opt.sample_size,
+		    width_mult=opt.width_mult)
+	
+
+	# Model Initialization
+	intialize(model)
+	model.eval()  
+	
+	save_cntr=0  
+
+	# define a video capture object
+	vid = cv2.VideoCapture(0)
+	list_of_frames = []
+	cnt=0
+	while(True):
+		
+		# Capture the video frame
+		# by frame
+		ret, frame = vid.read()
+		#frame = cv2.flip(frame,1)
+
+		# Display the resulting frame
+		cv2.imshow('webcam', frame)
+		#print(frame.shape)
+	
+		list_of_frames.append(frame)
+		cnt+=1
+		if(cnt==opt.frame_to_send):
+			tensor_out = model(pre_process(list_of_frames))
+			tensor_out = F.softmax(tensor_out, dim=1)
+			out = np.squeeze((tensor_out.cpu().detach().numpy()))
+			argmax = np.argmax(out)
+			#print(cnt)
+			classname = labels[argmax][0]
+			print("ClassName:",classname,"Confidence:",out[argmax])
+
+			if out[argmax] >= opt.confidence_threshold:
+				cv2.destroyAllWindows()
+				performAction(classname,vid)
+			list_of_frames=[]
+			cnt=0
+		
+		# the 'q' button is set as the
+		# quitting button you may use any
+		# desired button of your choice
+		if cv2.waitKey(1) & 0xFF == ord('q'):
+			break
+	
+	# After the loop release the cap object
+	vid.release()
+	# Destroy all the windows
+	cv2.destroyAllWindows()
+ 
+
+
+		
+
